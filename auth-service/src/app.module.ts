@@ -5,6 +5,9 @@ import { ThrottlerModule } from '@nestjs/throttler';
 import { configValidationSchema } from './config/configuration';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import { AuthModule } from './auth/auth.module';
+import { GatewayModule } from './gateway/gateway.module';
+import { AdminModule } from './admin/admin.module';
 
 @Module({
   imports: [
@@ -21,6 +24,9 @@ import { AppService } from './app.service';
       inject: [ConfigService],
     }),
     ThrottlerModule.forRoot([{ ttl: 60000, limit: 10 }]),
+    AuthModule,
+    GatewayModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [AppService],
