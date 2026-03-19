@@ -1,0 +1,129 @@
+syntax = "proto3";
+package staylike.booking;
+
+service BookingService {
+  // New booking endpoints
+  rpc CreateBooking(CreateBookingReq) returns (BookingResp);
+  rpc GetMyBookings(GetMyBookingsReq) returns (BookingsPageResp);
+  rpc GetBookingById(BookingIdReq) returns (BookingResp);
+  rpc UpdateBooking(UpdateBookingReq) returns (BookingResp);
+  rpc DeleteBooking(DeleteBookingReq) returns (GenericResp);
+  rpc GetAllBookings(GetAllBookingsReq) returns (BookingsPageResp);
+
+  // Kept for backward compatibility (review-service)
+  rpc ValidateBooking(BookingIdReq) returns (GenericResp);
+
+  // Admin RPCs
+  rpc GetBookingsByRoom(RoomIdReq) returns (BookingsPageResp);
+  rpc ForceCancelBooking(BookingIdReq) returns (GenericResp);
+  rpc GetBookingStats(Empty) returns (BookingStatsResp);
+}
+
+// ---- Request messages ----
+
+message CreateBookingReq {
+  string guestId = 1;
+  string roomId = 2;
+  string reservationDate = 3;
+  string checkInTime = 4;
+  string checkOutTime = 5;
+  int32 memberCount = 6;
+  string board = 7; // 'full' | 'half'
+}
+
+message UpdateBookingReq {
+  string bookingId = 1;
+  string guestId = 2;
+  string reservationDate = 3;
+  string checkInTime = 4;
+  string checkOutTime = 5;
+  int32 memberCount = 6;
+  string board = 7;
+}
+
+message DeleteBookingReq {
+  string bookingId = 1;
+  string requesterId = 2;
+  string requesterRole = 3;
+}
+
+message GetMyBookingsReq {
+  string guestId = 1;
+  string board = 2;
+  string reservationDate = 3;
+  int32 offset = 4;
+  int32 limit = 5;
+}
+
+message GetAllBookingsReq {
+  string board = 1;
+  string reservationDate = 2;
+  int32 offset = 3;
+  int32 limit = 4;
+}
+
+message BookingIdReq { string bookingId = 1; }
+
+// ---- Response messages ----
+
+message PopulatedUser {
+  string id = 1;
+  string name = 2;
+  string email = 3;
+  string role = 4;
+}
+
+message PopulatedRoom {
+  string id = 1;
+  string title = 2;
+  string city = 3;
+  string description = 4;
+  double price = 5;
+}
+
+message BookingResp {
+  string id = 1;
+  string guestId = 2;
+  string roomId = 3;
+  string hostId = 4;
+  string reservationDate = 5;
+  string checkInTime = 6;
+  string checkOutTime = 7;
+  int32 memberCount = 8;
+  string board = 9;
+  string createdAt = 10;
+  string updatedAt = 11;
+  PopulatedUser guest = 12;
+  PopulatedRoom room = 13;
+  PopulatedUser host = 14;
+}
+
+message BookingsPageResp {
+  repeated BookingResp bookings = 1;
+  int32 total = 2;
+  int32 offset = 3;
+  int32 limit = 4;
+}
+
+message GenericResp {
+  bool ok = 1;
+  string message = 2;
+}
+
+// Admin messages
+message Empty {}
+message RoomIdReq { string roomId = 1; }
+
+message MonthlyCount {
+  string month = 1;
+  int32 count = 2;
+  double revenue = 3;
+}
+
+message BookingStatsResp {
+  int32 totalBookings = 1;
+  double totalRevenue = 2;
+  double cancellationRate = 3;
+  repeated MonthlyCount monthlyReservations = 4;
+}
+
