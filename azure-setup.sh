@@ -9,7 +9,7 @@ RESOURCE_GROUP="CTSE_gr"
 ACR_NAME="ctseassignment1"
 ENVIRONMENT_NAME="stayeasy-env"
 WORKSPACE_NAME="stayeasy-logs"
-LOCATION="eastus"
+LOCATION="southeastasia"
 SP_NAME="ctse-github-actions"
 # ─────────────────────────────────────────────────────────────────
 
