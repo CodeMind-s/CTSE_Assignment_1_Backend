@@ -12,5 +12,5 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package*.json ./
 COPY common/protos/ /common/protos/
 
-EXPOSE 3000
+EXPOSE 3400
 CMD ["node", "dist/main"]

@@ -230,7 +230,7 @@ services:
       - NOTIFICATION_SERVICE_HOST=notification-service
       - NOTIFICATION_SERVICE_PORT=50055
     ports:
-      - '3000:3000'
+      - '3400:3400'
     depends_on:
       - auth-service
       - user-service

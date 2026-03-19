@@ -1,0 +1,500 @@
+name: Backend CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEPLOYMENT ORDER:
+#   kafka-broker, booking-db  →  auth, user, rooms  →  booking, review, notification  →  api-gateway
+# ─────────────────────────────────────────────────────────────────────────────
+
+jobs:
+  # ───────────────────────────────────────────────────────────────
+  # JOB 1: Build, test, SonarCloud scan (runs on every push/PR)
+  # ───────────────────────────────────────────────────────────────
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - api-gateway
+          - auth-service
+          - user-service
+          - rooms-service
+          - booking-service
+          - review-service
+          - notification-service
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.service }}
+        run: npm ci
+
+      - name: Build
+        working-directory: ${{ matrix.service }}
+        run: npm run build
+
+      - name: Run tests
+        working-directory: ${{ matrix.service }}
+        run: npm run test -- --coverage --passWithNoTests
+
+      - name: SonarCloud Scan
+        if: github.event_name == 'push'
+        uses: SonarSource/sonarcloud-github-action@v2
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          projectBaseDir: ${{ matrix.service }}
+
+  # ───────────────────────────────────────────────────────────────
+  # JOB 2: Build & push Docker images to ACR
+  #   Build context = repo root (.) — required because all Dockerfiles
+  #   do  COPY common/protos/ /common/protos/  in the production stage.
+  # ───────────────────────────────────────────────────────────────
+  push-images:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: |
+      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - api-gateway
+          - auth-service
+          - user-service
+          - rooms-service
+          - booking-service
+          - review-service
+          - notification-service
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Azure Container Registry
+        uses: azure/docker-login@v1
+        with:
+          login-server: ctseassignment1.azurecr.io
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push ${{ matrix.service }}
+        run: |
+          docker build \
+            -t ctseassignment1.azurecr.io/${{ matrix.service }}:${{ github.sha }} \
+            -t ctseassignment1.azurecr.io/${{ matrix.service }}:latest \
+            -f ${{ matrix.service }}/Dockerfile \
+            .
+          docker push ctseassignment1.azurecr.io/${{ matrix.service }}:${{ github.sha }}
+          docker push ctseassignment1.azurecr.io/${{ matrix.service }}:latest
+
+  # ───────────────────────────────────────────────────────────────
+  # JOB 3: Deploy Kafka + PostgreSQL (stateful infra, 1 replica each)
+  #
+  #   IMPORTANT: env domain is fetched FIRST so that
+  #   KAFKA_ADVERTISED_LISTENERS can be set to the internal FQDN.
+  #   Without this, KafkaJS clients get a localhost redirect and
+  #   can never connect.
+  # ───────────────────────────────────────────────────────────────
+  deploy-infrastructure:
+    needs: push-images
+    runs-on: ubuntu-latest
+    if: |
+      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      github.event_name == 'workflow_dispatch'
+    outputs:
+      env_domain: ${{ steps.get-env-domain.outputs.env_domain }}
+
+    steps:
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # Fetch env domain BEFORE deploying infra so we can set Kafka's
+      # advertised listener to its stable internal FQDN.
+      - name: Get Container Apps environment domain
+        id: get-env-domain
+        run: |
+          ENV_DOMAIN=$(az containerapp env show \
+            --name stayeasy-env \
+            --resource-group CTSE_gr \
+            --query properties.defaultDomain -o tsv)
+          echo "env_domain=$ENV_DOMAIN" >> $GITHUB_OUTPUT
+          echo "ENV_DOMAIN=$ENV_DOMAIN" >> $GITHUB_ENV
+
+      - name: Deploy Kafka broker
+        run: |
+          KAFKA_INTERNAL_HOST="kafka-broker.internal.${ENV_DOMAIN}"
+
+          if ! az containerapp show \
+              --name kafka-broker \
+              --resource-group CTSE_gr &>/dev/null; then
+            az containerapp create \
+              --name kafka-broker \
+              --resource-group CTSE_gr \
+              --environment stayeasy-env \
+              --image docker.io/apache/kafka:latest \
+              --min-replicas 1 \
+              --max-replicas 1 \
+              --ingress internal \
+              --target-port 9092 \
+              --transport tcp \
+              --env-vars \
+                KAFKA_NODE_ID=1 \
+                KAFKA_PROCESS_ROLES=broker,controller \
+                "KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093" \
+                "KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://${KAFKA_INTERNAL_HOST}:9092" \
+                "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT" \
+                "KAFKA_CONTROLLER_QUORUM_VOTERS=1@${KAFKA_INTERNAL_HOST}:9093" \
+                KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+                KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+                KAFKA_AUTO_CREATE_TOPICS_ENABLE=true \
+                KAFKA_NUM_PARTITIONS=1 \
+                KAFKA_DEFAULT_REPLICATION_FACTOR=1 \
+                CLUSTER_ID=MkU3OEVBNTcwNTJENDM2Qk
+            echo "kafka-broker deployed"
+          else
+            echo "kafka-broker already exists, skipping"
+          fi
+
+      - name: Deploy PostgreSQL
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        run: |
+          if ! az containerapp show \
+              --name booking-db \
+              --resource-group CTSE_gr &>/dev/null; then
+            az containerapp create \
+              --name booking-db \
+              --resource-group CTSE_gr \
+              --environment stayeasy-env \
+              --image docker.io/postgres:15-alpine \
+              --min-replicas 1 \
+              --max-replicas 1 \
+              --ingress internal \
+              --target-port 5432 \
+              --transport tcp \
+              --env-vars \
+                POSTGRES_USER=postgres \
+                "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}" \
+                POSTGRES_DB=stayeasy_booking
+            echo "booking-db deployed"
+          else
+            echo "booking-db already exists, skipping"
+          fi
+
+      - name: Wait for infrastructure to be ready
+        run: sleep 30
+
+  # ───────────────────────────────────────────────────────────────
+  # JOB 4: Deploy auth-service, user-service, rooms-service
+  # ───────────────────────────────────────────────────────────────
+  deploy-core-services:
+    needs: deploy-infrastructure
+    runs-on: ubuntu-latest
+    if: |
+      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - auth-service
+          - user-service
+          - rooms-service
+
+    steps:
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy ${{ matrix.service }}
+        env:
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          REFRESH_SECRET: ${{ secrets.REFRESH_SECRET }}
+          INTERNAL_SERVICE_KEY: ${{ secrets.INTERNAL_SERVICE_KEY }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          ENV_DOMAIN="${{ needs.deploy-infrastructure.outputs.env_domain }}"
+          SERVICE="${{ matrix.service }}"
+          IMAGE="ctseassignment1.azurecr.io/${SERVICE}:${{ github.sha }}"
+
+          # Resolve port for this service
+          case "$SERVICE" in
+            auth-service)  PORT=50050 ;;
+            user-service)  PORT=50051 ;;
+            rooms-service) PORT=50052 ;;
+          esac
+
+          # Resolve optional DB_NAME
+          case "$SERVICE" in
+            user-service)  DB_NAME=user-db ;;
+            rooms-service) DB_NAME=rooms-db ;;
+            *)             DB_NAME="" ;;
+          esac
+
+          # Base env vars (common to all three)
+          ENV_ARGS=(
+            "MONGO_URI=${MONGO_URI}"
+            "JWT_SECRET=${JWT_SECRET}"
+            "INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY}"
+            "JWT_EXPIRES_IN=15m"
+            "REFRESH_SECRET=${REFRESH_SECRET}"
+            "REFRESH_EXPIRES_IN=7d"
+            "NODE_ENV=production"
+            "GRPC_PORT=${PORT}"
+          )
+
+          [ -n "$DB_NAME" ] && ENV_ARGS+=("DB_NAME=${DB_NAME}")
+
+          # auth-service also needs to reach user-service
+          if [ "$SERVICE" = "auth-service" ]; then
+            ENV_ARGS+=(
+              "USER_SERVICE_HOST=user-service.internal.${ENV_DOMAIN}"
+              "USER_SERVICE_PORT=50051"
+            )
+          fi
+
+          if az containerapp show \
+              --name "$SERVICE" \
+              --resource-group CTSE_gr &>/dev/null; then
+            az containerapp update \
+              --name "$SERVICE" \
+              --resource-group CTSE_gr \
+              --image "$IMAGE" \
+              --set-env-vars "${ENV_ARGS[@]}"
+          else
+            az containerapp create \
+              --name "$SERVICE" \
+              --resource-group CTSE_gr \
+              --environment stayeasy-env \
+              --image "$IMAGE" \
+              --min-replicas 1 \
+              --max-replicas 3 \
+              --ingress internal \
+              --target-port "$PORT" \
+              --transport http2 \
+              --registry-server ctseassignment1.azurecr.io \
+              --registry-username "$ACR_USERNAME" \
+              --registry-password "$ACR_PASSWORD" \
+              --env-vars "${ENV_ARGS[@]}"
+          fi
+
+  # ───────────────────────────────────────────────────────────────
+  # JOB 5: Deploy booking-service, review-service, notification-service
+  # ───────────────────────────────────────────────────────────────
+  deploy-dependent-services:
+    needs: [deploy-infrastructure, deploy-core-services]
+    runs-on: ubuntu-latest
+    if: |
+      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - booking-service
+          - review-service
+          - notification-service
+
+    steps:
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy ${{ matrix.service }}
+        env:
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          INTERNAL_SERVICE_KEY: ${{ secrets.INTERNAL_SERVICE_KEY }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          ENV_DOMAIN="${{ needs.deploy-infrastructure.outputs.env_domain }}"
+          SERVICE="${{ matrix.service }}"
+          IMAGE="ctseassignment1.azurecr.io/${SERVICE}:${{ github.sha }}"
+          KAFKA_HOST="kafka-broker.internal.${ENV_DOMAIN}:9092"
+
+          case "$SERVICE" in
+            booking-service)  PORT=50053 ;;
+            review-service)   PORT=50054 ;;
+            notification-service) PORT=50055 ;;
+          esac
+
+          # Common env vars for all three
+          ENV_ARGS=(
+            "MONGO_URI=${MONGO_URI}"
+            "JWT_SECRET=${JWT_SECRET}"
+            "INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY}"
+            "NODE_ENV=production"
+            "GRPC_PORT=${PORT}"
+          )
+
+          # Service-specific env vars
+          case "$SERVICE" in
+            booking-service)
+              ENV_ARGS+=(
+                "USER_SERVICE_HOST=user-service.internal.${ENV_DOMAIN}"
+                "USER_SERVICE_PORT=50051"
+                "ROOMS_SERVICE_HOST=rooms-service.internal.${ENV_DOMAIN}"
+                "ROOMS_SERVICE_PORT=50052"
+                "POSTGRES_HOST=booking-db.internal.${ENV_DOMAIN}"
+                "POSTGRES_PORT=5432"
+                "POSTGRES_USER=postgres"
+                "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}"
+                "POSTGRES_DB=stayeasy_booking"
+                "KAFKA_BROKERS=${KAFKA_HOST}"
+              )
+              ;;
+            review-service)
+              ENV_ARGS+=(
+                "DB_NAME=review-db"
+                "BOOKING_SERVICE_HOST=booking-service.internal.${ENV_DOMAIN}"
+                "BOOKING_SERVICE_PORT=50053"
+                "USER_SERVICE_HOST=user-service.internal.${ENV_DOMAIN}"
+                "USER_SERVICE_PORT=50051"
+                "ROOMS_SERVICE_HOST=rooms-service.internal.${ENV_DOMAIN}"
+                "ROOMS_SERVICE_PORT=50052"
+                "KAFKA_BROKERS=${KAFKA_HOST}"
+                "KAFKAJS_NO_PARTITIONER_WARNING=1"
+              )
+              ;;
+            notification-service)
+              ENV_ARGS+=(
+                "DB_NAME=stayease_notification"
+                "KAFKA_BROKERS=${KAFKA_HOST}"
+                "KAFKAJS_NO_PARTITIONER_WARNING=1"
+                "SMTP_HOST=${SMTP_HOST}"
+                "SMTP_PORT=587"
+                "SMTP_USER=${SMTP_USER}"
+                "SMTP_PASS=${SMTP_PASS}"
+              )
+              ;;
+          esac
+
+          if az containerapp show \
+              --name "$SERVICE" \
+              --resource-group CTSE_gr &>/dev/null; then
+            az containerapp update \
+              --name "$SERVICE" \
+              --resource-group CTSE_gr \
+              --image "$IMAGE" \
+              --set-env-vars "${ENV_ARGS[@]}"
+          else
+            az containerapp create \
+              --name "$SERVICE" \
+              --resource-group CTSE_gr \
+              --environment stayeasy-env \
+              --image "$IMAGE" \
+              --min-replicas 1 \
+              --max-replicas 3 \
+              --ingress internal \
+              --target-port "$PORT" \
+              --transport http2 \
+              --registry-server ctseassignment1.azurecr.io \
+              --registry-username "$ACR_USERNAME" \
+              --registry-password "$ACR_PASSWORD" \
+              --env-vars "${ENV_ARGS[@]}"
+          fi
+
+  # ───────────────────────────────────────────────────────────────
+  # JOB 6: Deploy public API Gateway (external ingress, port 3400)
+  # ───────────────────────────────────────────────────────────────
+  deploy-api-gateway:
+    needs: [deploy-infrastructure, deploy-core-services, deploy-dependent-services]
+    runs-on: ubuntu-latest
+    if: |
+      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy api-gateway
+        env:
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          INTERNAL_SERVICE_KEY: ${{ secrets.INTERNAL_SERVICE_KEY }}
+          ALLOWED_ORIGINS: ${{ secrets.ALLOWED_ORIGINS }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          ENV_DOMAIN="${{ needs.deploy-infrastructure.outputs.env_domain }}"
+          IMAGE="ctseassignment1.azurecr.io/api-gateway:${{ github.sha }}"
+
+          ENV_ARGS=(
+            "PORT=3400"
+            "NODE_ENV=production"
+            "JWT_SECRET=${JWT_SECRET}"
+            "INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY}"
+            "ALLOWED_ORIGINS=${ALLOWED_ORIGINS}"
+            "AUTH_SERVICE_HOST=auth-service.internal.${ENV_DOMAIN}"
+            "AUTH_SERVICE_PORT=50050"
+            "USER_SERVICE_HOST=user-service.internal.${ENV_DOMAIN}"
+            "USER_SERVICE_PORT=50051"
+            "ROOMS_SERVICE_HOST=rooms-service.internal.${ENV_DOMAIN}"
+            "ROOMS_SERVICE_PORT=50052"
+            "BOOKING_SERVICE_HOST=booking-service.internal.${ENV_DOMAIN}"
+            "BOOKING_SERVICE_PORT=50053"
+            "REVIEW_SERVICE_HOST=review-service.internal.${ENV_DOMAIN}"
+            "REVIEW_SERVICE_PORT=50054"
+            "NOTIFICATION_SERVICE_HOST=notification-service.internal.${ENV_DOMAIN}"
+            "NOTIFICATION_SERVICE_PORT=50055"
+          )
+
+          if az containerapp show \
+              --name api-gateway \
+              --resource-group CTSE_gr &>/dev/null; then
+            az containerapp update \
+              --name api-gateway \
+              --resource-group CTSE_gr \
+              --image "$IMAGE" \
+              --set-env-vars "${ENV_ARGS[@]}"
+          else
+            az containerapp create \
+              --name api-gateway \
+              --resource-group CTSE_gr \
+              --environment stayeasy-env \
+              --image "$IMAGE" \
+              --min-replicas 1 \
+              --max-replicas 5 \
+              --ingress external \
+              --target-port 3400 \
+              --transport http \
+              --registry-server ctseassignment1.azurecr.io \
+              --registry-username "$ACR_USERNAME" \
+              --registry-password "$ACR_PASSWORD" \
+              --env-vars "${ENV_ARGS[@]}"
+          fi
+
+      - name: Output gateway URL
+        run: |
+          FQDN=$(az containerapp show \
+            --name api-gateway \
+            --resource-group CTSE_gr \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          echo "✅ API Gateway: https://$FQDN"
+          echo "✅ Swagger UI:  https://$FQDN/api/docs"
