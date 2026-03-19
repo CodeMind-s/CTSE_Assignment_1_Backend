@@ -1,0 +1,11 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./user-service" },
+    { "path": "./auth-service" },
+    { "path": "./rooms-service" },
+    { "path": "./booking-service" },
+    { "path": "./review-service" },
+    { "path": "./api-gateway" }
+  ]
+}
