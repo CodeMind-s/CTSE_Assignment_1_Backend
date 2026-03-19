@@ -1,0 +1,96 @@
+syntax = "proto3";
+package staylike.review;
+
+service ReviewService {
+  rpc AddReview(AddReviewReq) returns (ReviewItem);
+  rpc GetReviewsByListing(GetReviewsReq) returns (ReviewsPageResp);
+  rpc GetMyReviews(GetMyReviewsReq) returns (ReviewsPageResp);
+  rpc UpdateReview(UpdateReviewReq) returns (ReviewItem);
+  rpc DeleteReview(DeleteReviewReq) returns (GenericResp);
+}
+
+// ---- Request messages ----
+
+message AddReviewReq {
+  string userId = 1;
+  string listingId = 2;
+  string bookingId = 3;
+  int32 rating = 4;
+  string comment = 5;
+}
+
+message GetReviewsReq {
+  string listingId = 1;
+  int32 offset = 2;
+  int32 limit = 3;
+}
+
+message GetMyReviewsReq {
+  string userId = 1;
+  int32 offset = 2;
+  int32 limit = 3;
+}
+
+message UpdateReviewReq {
+  string reviewId = 1;
+  string userId = 2;
+  int32 rating = 3;
+  string comment = 4;
+}
+
+message DeleteReviewReq {
+  string reviewId = 1;
+  string userId = 2;
+}
+
+// ---- Population messages ----
+
+message PopulatedReviewer {
+  string id = 1;
+  string name = 2;
+  string email = 3;
+}
+
+message PopulatedBookingInfo {
+  string id = 1;
+  string guestId = 2;
+  string checkInTime = 3;
+  string checkOutTime = 4;
+  string roomId = 5;
+  string reservationDate = 6;
+}
+
+message PopulatedRoomInfo {
+  string id = 1;
+  string title = 2;
+  string city = 3;
+  double price = 4;
+}
+
+// ---- Response messages ----
+
+message ReviewItem {
+  string id = 1;
+  string userId = 2;
+  string listingId = 3;
+  string bookingId = 4;
+  int32 rating = 5;
+  string comment = 6;
+  string createdAt = 7;
+  string updatedAt = 8;
+  PopulatedReviewer user = 9;
+  PopulatedBookingInfo booking = 10;
+  PopulatedRoomInfo room = 11;
+}
+
+message ReviewsPageResp {
+  repeated ReviewItem reviews = 1;
+  int32 total = 2;
+  int32 offset = 3;
+  int32 limit = 4;
+}
+
+message GenericResp {
+  bool ok = 1;
+  string message = 2;
+}
