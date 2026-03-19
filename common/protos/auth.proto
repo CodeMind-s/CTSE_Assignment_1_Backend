@@ -1,0 +1,36 @@
+syntax = "proto3";
+package staylike.auth;
+
+import "user.proto";
+
+service AuthService {
+  rpc Register(RegisterReq) returns (AuthResp);
+  rpc Login(LoginReq) returns (AuthResp);
+  rpc ValidateToken(TokenReq) returns (TokenResp);
+}
+
+message RegisterReq {
+  string email = 1;
+  string password = 2;
+  string name = 3;
+  string role = 4;
+}
+
+message LoginReq {
+  string email = 1;
+  string password = 2;
+}
+
+message AuthResp {
+  string accessToken = 1;
+  string refreshToken = 2;
+  staylike.user.UserResp user = 3;
+}
+
+message TokenReq { string token = 1; }
+
+message TokenResp {
+  bool valid = 1;
+  string userId = 2;
+  string role = 3;
+}

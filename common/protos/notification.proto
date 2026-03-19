@@ -1,0 +1,63 @@
+syntax = "proto3";
+package staylike.notification;
+
+service NotificationService {
+  rpc GetUserNotifications(GetUserNotificationsReq) returns (NotificationsResp);
+  rpc MarkNotificationsRead(MarkReadReq) returns (GenericResp);
+  rpc DeleteNotifications(DeleteNotificationsReq) returns (GenericResp);
+
+  // Admin RPCs
+  rpc GetAllNotifications(GetAllNotificationsReq) returns (NotificationsPageResp);
+  rpc RetryNotification(NotificationIdReq) returns (GenericResp);
+}
+
+message GetUserNotificationsReq {
+  string userId = 1;
+}
+
+message MarkReadReq {
+  repeated string notificationIds = 1;
+  string userId = 2;
+}
+
+message DeleteNotificationsReq {
+  repeated string notificationIds = 1;
+  string userId = 2;
+}
+
+message NotificationItem {
+  string id = 1;
+  string type = 2;
+  string userId = 3;
+  string title = 4;
+  string message = 5;
+  bool isRead = 6;
+  string createdAt = 7;
+  string updatedAt = 8;
+}
+
+message NotificationsResp {
+  repeated NotificationItem notifications = 1;
+}
+
+message GenericResp {
+  bool ok = 1;
+  string message = 2;
+}
+
+// Admin messages
+message GetAllNotificationsReq {
+  int32 page = 1;
+  int32 limit = 2;
+  string type = 3;
+}
+
+message NotificationsPageResp {
+  repeated NotificationItem notifications = 1;
+  int32 total = 2;
+  int32 page = 3;
+  int32 limit = 4;
+}
+
+message NotificationIdReq { string id = 1; }
+

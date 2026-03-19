@@ -1,0 +1,70 @@
+syntax = "proto3";
+package staylike.user;
+
+service UserService {
+  rpc CreateUser(CreateUserReq) returns (UserResp);
+  rpc GetUserByEmail(EmailReq) returns (UserResp);
+  rpc GetUserById(IdReq) returns (UserResp);
+  rpc ValidateUserRole(RoleReq) returns (ValidateRoleResp);
+
+  // Admin RPCs
+  rpc GetAllUsers(GetAllUsersReq) returns (UsersPageResp);
+  rpc SuspendUser(IdReq) returns (UserResp);
+  rpc UpdateUserRole(RoleReq) returns (UserResp);
+  rpc DeleteUser(IdReq) returns (GenericResp);
+  rpc GetUserCount(Empty) returns (UserCountResp);
+}
+
+message Empty {}
+
+message CreateUserReq {
+  string email = 1;
+  string passwordHash = 2;
+  string name = 3;
+  string role = 4;
+}
+
+message EmailReq { string email = 1; }
+message IdReq { string id = 1; }
+
+message UserResp {
+  string id = 1;
+  string email = 2;
+  string name = 3;
+  string role = 4;
+  bool active = 5;
+}
+
+message RoleReq { string id = 1; string role = 2; }
+message ValidateRoleResp { bool ok = 1; string message = 2; }
+
+// Admin messages
+message GetAllUsersReq {
+  int32 page = 1;
+  int32 limit = 2;
+  string search = 3;
+  string role = 4;
+  string suspended = 5;
+}
+
+message UsersPageResp {
+  repeated UserResp users = 1;
+  int32 total = 2;
+  int32 page = 3;
+  int32 limit = 4;
+}
+
+message GenericResp {
+  bool ok = 1;
+  string message = 2;
+}
+
+message RoleCount {
+  string role = 1;
+  int32 count = 2;
+}
+
+message UserCountResp {
+  int32 total = 1;
+  repeated RoleCount byRole = 2;
+}
